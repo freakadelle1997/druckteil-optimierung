@@ -352,8 +352,10 @@ class Modell:
         """Schutzbereich (trimesh-Volumen): bleibt massiv."""
         # nicht einzeln spiegeln: ein Ring rechts hat sein Gegenstück in einem
         # anderen Körper; die Symmetrie des Ganzen stellt optimieren() her
-        self.passiv |= innen_maske(koerper, self.achsen)[tuple(self.ijk.T)]
+        maske = innen_maske(koerper, self.achsen)[tuple(self.ijk.T)]
+        self.passiv |= maske
         self.schutz.append(koerper)
+        self._schutz_masken = getattr(self, "_schutz_masken", []) + [maske]
 
     # --- Gleichungssystem -----------------------------------------------------
     def _vorbereiten(self):
@@ -556,6 +558,18 @@ class Modell:
             xP[self.passiv] = 1
             return xP
 
+        # Schutzbereich ohne Last und ohne Lagerung trägt nichts: die
+        # Optimierung bindet ihn dann nicht an (er hängt am Ende frei)
+        belastet = np.zeros(self.ndof // 3, bool)
+        for f, _ in self.lastfaelle.values():
+            belastet |= np.abs(f.reshape(-1, 3)).sum(1) > 0
+        belastet |= self.fest_dof.reshape(-1, 3).any(1)
+        for i, maske in enumerate(getattr(self, "_schutz_masken", [])):
+            if not belastet[np.unique(self.enode[maske])].any():
+                lo, hi = self.schutz[i].bounds
+                self.log(f"Warnung: Schutzbereich {i + 1} ({np.round(lo, 1)} bis {np.round(hi, 1)}) "
+                         f"hat weder Last noch Lagerung und wird wohl nicht angebunden")
+
         V_ziel = volumenanteil * self.vol.sum()
         V_pass = self.vol[self.passiv].sum()
         if V_pass >= V_ziel:
@@ -571,6 +585,7 @@ class Modell:
         verlauf = []
         self.log(f"Optimierung: Ziel {volumenanteil:.0%} Volumen "
                  f"(Schutzbereiche {V_pass / self.vol.sum():.0%}), rmin {rmin} mm")
+        it = 0
         for it in range(1, max_iter + 1):
             t0 = time.time()
             xT = Hv @ x / Hs
@@ -626,9 +641,13 @@ class Modell:
         return dict(xP=physisch(x, beta), verlauf=verlauf)
 
     # --- Geometrie --------------------------------------------------------------
-    def ergebnis_mesh(self, xP, pitch=0.35, schwelle=0.5, glatt=10, insel_anteil=0.02):
+    def ergebnis_mesh(self, xP, pitch=0.35, schwelle=0.5, rundung=1.0, glatt=20, insel_anteil=0.02):
         """Dichtefeld -> glatte Fläche, geschnitten mit dem Original, vereinigt
-        mit den Schutzbereichen. Kleine abgetrennte Inseln fallen weg."""
+        mit den Schutzbereichen. Kleine abgetrennte Inseln fallen weg.
+        rundung [mm]: Weichzeichnen des Dichtefelds vor dem Flächenbau; rundet
+        Fensterecken und Strebenansätze zu Hohlkehlen (etwa 1-2 x rundung) und
+        nimmt die Rastertreppen weg. Streben unter etwa 2 x rundung werden
+        dabei dünner, daher danach immer nachrechnen."""
         feld = np.zeros(self.innen.shape)
         feld[tuple(self.ijk.T)] = xP
         idx = ndi.distance_transform_edt(~self.innen, return_distances=False, return_indices=True)
@@ -642,8 +661,10 @@ class Modell:
         F = np.empty((len(g[0]),) + Y.shape, np.float32)
         for i, xv in enumerate(g[0]):
             F[i] = ip(np.column_stack([np.full(Y.size, xv), Y.ravel(), Z.ravel()])).reshape(Y.shape)
-        F = np.pad(F, 1, constant_values=0)
         schritt = np.array([gi[1] - gi[0] for gi in g])
+        if rundung > 0:
+            F = ndi.gaussian_filter(F, rundung / schritt, mode="nearest")
+        F = np.pad(F, 1, constant_values=0)
         v, f, _, _ = marching_cubes(F, schwelle, spacing=tuple(schritt))
         # ohne process: das Aufräumen entfernt entartete Dreiecke und reißt Löcher
         dichte = trimesh.Trimesh(v + lo - schritt, f, process=False)

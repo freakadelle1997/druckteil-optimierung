@@ -66,6 +66,7 @@ F_FUEHRUNG = 20.0            # N je Schuh, quer gegen die Stege
 H_RASTER = 1.0               # mm Elementgröße (Wände liegen exakt auf dem Raster)
 RMIN = 2.0                   # mm Filterradius, kleinste Strebe etwa 4 mm
 VOLUMEN = 0.5                # Anteil des Originalvolumens, der bleibt
+RUNDUNG = 1.5                # mm Weichzeichnen der Fläche: geschwungene Konturen, Hohlkehlen
 
 KLEMM_R = {"wand": 5.0, "holz": 3.7}   # Scheibe Ø 10 / Senkkopf Ø 7,4
 RING = 2.0                   # Schutzring um die Klemmfläche
@@ -196,7 +197,9 @@ def main():
     ap.add_argument("--vol", type=float, default=VOLUMEN)
     ap.add_argument("--h", type=float, default=H_RASTER)
     ap.add_argument("--rmin", type=float, default=RMIN)
-    ap.add_argument("--nur-mesh", action="store_true")
+    ap.add_argument("--rundung", type=float, default=RUNDUNG)
+    ap.add_argument("--nur-mesh", action="store_true",
+                    help="Fläche, Nachrechnung und Bilder aus gespeicherter Dichte (optimierung/dichte_*.npz)")
     ap.add_argument("--ausfuehrlich", action="store_true", help="CG-Schritte je Lastfall zeigen")
     a = ap.parse_args()
     for d in (opt_dir, stl_dir, prev_dir):
@@ -219,7 +222,7 @@ def main():
         erg = m0.optimieren(a.vol, rmin=a.rmin, beta_max=16, stufe=20, max_iter=120)
         xP, verlauf = erg["xP"], erg["verlauf"]
         np.savez_compressed(dichte_datei, xP=xP)
-    neu = m0.ergebnis_mesh(xP)
+    neu = m0.ergebnis_mesh(xP, rundung=a.rundung)
     m0.beenden()
     print(f"Fläche: wasserdicht {neu.is_watertight}, {len(neu.faces)} Dreiecke, "
           f"{neu.volume / 1000:.1f} cm³")
@@ -240,7 +243,7 @@ def main():
     flach.export(out)
     print(out)
     with open(os.path.join(opt_dir, f"bericht_{tag}.json"), "w") as f:
-        json.dump(dict(variante=v, volumenanteil=a.vol, h=a.h, rmin=a.rmin,
+        json.dump(dict(variante=v, volumenanteil=a.vol, h=a.h, rmin=a.rmin, rundung=a.rundung,
                        lasten=dict(senkrecht=F_SENK, seitlich=F_SEIT, zug=F_ZUG,
                                    fuehrung=F_FUEHRUNG),
                        werkstoff=to.ABS_LIKE_3,
