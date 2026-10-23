@@ -17,6 +17,10 @@ Lastannahme je Schuh (einstellbar unten):
                ganze Wangenfläche verteilen: dann baut die Optimierung zu
                jedem Lastpunkt eine eigene Rippe, ein Kamm aus Zinken.)
   - Zug:        50 N nach vorne über die Brettschrauben (halbes Gewicht)
+  - Führung:    20 N quer gegen die Innenseite der Stege an Vorder- und
+               Oberkante der Wange. Ohne eigene Last tragen die Stege nichts,
+               und die Optimierung lässt sie unverbunden (oberer Steg hing
+               nur vorne, vorderer nur am Boden).
 
 Lagerung: Die Schraubenköpfe mit Unterlegscheibe (wand: Ø 10) bzw. die
 Senkköpfe (holz: Ø 7,4) klemmen die Lasche fest; die übrige Wandseite liegt
@@ -58,6 +62,7 @@ import topopt as to  # noqa: E402
 F_SENK = 150.0               # N je Schuh, senkrecht
 F_SEIT = 30.0                # N je Schuh, quer
 F_ZUG = 50.0                 # N je Schuh, nach vorne
+F_FUEHRUNG = 20.0            # N je Schuh, quer gegen die Stege
 H_RASTER = 1.0               # mm Elementgröße (Wände liegen exakt auf dem Raster)
 RMIN = 2.0                   # mm Filterradius, kleinste Strebe etwa 4 mm
 VOLUMEN = 0.5                # Anteil des Originalvolumens, der bleibt
@@ -118,6 +123,9 @@ def randbedingungen(m, variante):
         & (np.hypot(Y - bs.BRETT_LOCH_Y, Z - bs.T_BODEN - z) <= rb + BRETT_RING), True)
         for z in bs.BRETT_LOCH_Z])
     m.last("seitlich", ring, (F_SEIT, 0, 0))
+    steg = m.knoten_wo(lambda X, Y, Z: (np.abs(X - bs.xi) < eps) & (Z >= bs.T_BODEN - eps)
+                       & ((Y >= bs.TIEFE - RAND - eps) | (Z >= bs.H - RAND - eps)), True)
+    m.last("Führung", steg, (F_FUEHRUNG, 0, 0))
 
 
 def zusammenfassung(name, m, r):
@@ -233,7 +241,8 @@ def main():
     print(out)
     with open(os.path.join(opt_dir, f"bericht_{tag}.json"), "w") as f:
         json.dump(dict(variante=v, volumenanteil=a.vol, h=a.h, rmin=a.rmin,
-                       lasten=dict(senkrecht=F_SENK, seitlich=F_SEIT, zug=F_ZUG),
+                       lasten=dict(senkrecht=F_SENK, seitlich=F_SEIT, zug=F_ZUG,
+                                   fuehrung=F_FUEHRUNG),
                        werkstoff=to.ABS_LIKE_3,
                        volumen_cm3=dict(original=orig.volume / 1000, optimiert=neu.volume / 1000),
                        original=s0, optimiert=s1, verlauf=verlauf,
