@@ -21,6 +21,7 @@ import os
 import sys
 import numpy as np
 import trimesh
+from scipy.spatial import cKDTree
 from shapely.geometry import Point
 
 import balkenschuh_9mm as bs
@@ -184,15 +185,22 @@ def schienen(reihen):
 
 def ueberhang_punkte(variante, form, teil, rot, dz, vorhanden):
     """Zusätzliche Stützpunkte für Schnittflächen der optimierten Form, die in
-    Drucklage flach nach unten zeigen (Oberkanten der Fenster). Punkte, deren
-    Stütze durchs Teil laufen würde, fallen weg."""
+    Drucklage flach nach unten zeigen (v. a. Oberkanten der Fenster).
+    Bewertet wird die über 1,5 mm gemittelte Normale, sonst zählen die
+    Voxelstufen schräger Flächen als Überhang. Rückgabe: Liste (p, n, ziel),
+    ziel = None für Stützen bis zur Platte, sonst die Höhe in Drucklage, auf
+    der die Stütze auf dem Teil selbst aufsetzt (Stamm träfe sonst das Teil)."""
     orig = bs.balkenschuh(variante)
-    n_druck = form.face_normals @ rot.T
-    kand = np.nonzero(n_druck[:, 2] < -np.cos(np.radians(UEBERHANG)))[0]
+    alle_n, flaeche = form.face_normals, form.area_faces
+    kand = np.nonzero((alle_n @ rot.T)[:, 2] < -np.cos(np.radians(UEBERHANG)))[0]
     c = form.triangles_center[kand]
-    n = form.face_normals[kand]
+    baum = cKDTree(form.triangles_center)
+    n = np.array([(alle_n[i] * flaeche[i, None]).sum(0) for i in baum.query_ball_point(c, 1.5)])
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    flach = (n @ rot.T)[:, 2] < -np.cos(np.radians(UEBERHANG))
+    c, n = c[flach], n[flach]
     schnitt = topopt.punkte_innen(orig, c + 0.3 * n)      # außen davor war Material
-    kand, c, n = kand[schnitt], c[schnitt], n[schnitt]
+    c, n = c[schnitt], n[schnitt]
     hoehe = (c @ rot.T)[:, 2]
     belegt = [np.asarray(p, float) for p, _ in vorhanden]
     gewaehlt = []
@@ -201,30 +209,48 @@ def ueberhang_punkte(variante, form, teil, rot, dz, vorhanden):
             gewaehlt.append((tuple(c[i]), tuple(n[i])))
             belegt.append(c[i])
     if not gewaehlt:
-        return [], 0
+        return []
 
     # Belegung des Teils in Drucklage (0,4-mm-Raster) für den Freigang der Stämme
     lo, hi = teil.bounds
     ach = [np.arange(lo[a] - 0.2, hi[a] + 0.6, 0.4) for a in range(3)]
     voll = topopt.innen_maske(teil, ach)
 
-    def frei(punkte):
+    def belegt_an(punkte):
         idx = [np.clip(np.searchsorted(ach[a], punkte[:, a]) - 1, 0, len(ach[a]) - 2)
                for a in range(3)]
         drin = np.all([(punkte[:, a] > ach[a][0]) & (punkte[:, a] < ach[a][-1]) for a in range(3)], 0)
-        return not (voll[tuple(idx)] & drin).any()
+        return voll[tuple(idx)] & drin
 
-    gut = []
+    aus = []
     for p, nn in gewaehlt:
         pp = rot @ np.asarray(p) + [0, 0, dz]
         nd = rot @ np.asarray(nn)
         q = pp + KOPF_L * nd
-        kopf = pp + np.linspace(0.8, KOPF_L, 6)[:, None] * nd
-        stamm = np.column_stack([np.full(60, q[0]), np.full(60, q[1]),
-                                 np.linspace(q[2], RAFT_H + FUSS_H, 60)])
-        if q[2] - UEBERGANG_L > RAFT_H + FUSS_H + 0.5 and frei(np.vstack([kopf, stamm])):
-            gut.append((p, nn))
-    return gut, len(gewaehlt) - len(gut)
+        if belegt_an(pp + np.linspace(0.8, KOPF_L, 6)[:, None] * nd).any():
+            continue                                         # Kopf steckt im Teil
+        zs = np.arange(q[2] - 0.4, RAFT_H + FUSS_H, -0.2)
+        treffer = belegt_an(np.column_stack([np.full(len(zs), q[0]), np.full(len(zs), q[1]), zs]))
+        if not treffer.any():
+            if q[2] - UEBERGANG_L > RAFT_H + FUSS_H + 0.5:
+                aus.append((p, nn, None))
+        elif q[2] - zs[np.argmax(treffer)] >= 1.5:          # Platz für eine Stütze aufs Teil
+            aus.append((p, nn, zs[np.argmax(treffer)] + 0.2))
+    return aus
+
+
+def stuetze_auf_teil(p, n, ziel):
+    """Kurze Stütze, die auf dem Teil selbst aufsetzt (Kopf wie üblich, Stamm
+    dünn, unten wieder eine Kontaktspitze)."""
+    p, n = np.asarray(p), np.asarray(n)
+    q = p + KOPF_L * n
+    fuss = (q[0], q[1], ziel + 1.0)
+    return [
+        kegelstumpf(p - EMBED * n, q, KONTAKT_R, KOPF_R, 12),
+        kugel(q, KOPF_R),
+        kegelstumpf(q, fuss, KOPF_R, KOPF_R, 12),
+        kegelstumpf(fuss, (q[0], q[1], ziel - EMBED), KOPF_R, KONTAKT_R, 12),
+    ]
 
 
 def teil_mit_stuetzen(variante, form=None):
@@ -232,26 +258,32 @@ def teil_mit_stuetzen(variante, form=None):
     form: optimierte Form in Konstruktionslage (sonst das Original)."""
     m = druck_matrix()
     teil = bs.balkenschuh(variante) if form is None else form.copy()
-    punkte = stuetzpunkte(variante, form)
+    punkte = [(p, n, None) for p, n in stuetzpunkte(variante, form)]
     teil.apply_transform(m)
     dz = LIFT - teil.bounds[0][2]
     teil.apply_translation([0, 0, dz])
 
     rot = m[:3, :3]
     if form is not None:
-        extra, blockiert = ueberhang_punkte(variante, form, teil, rot, dz, punkte)
+        extra = ueberhang_punkte(variante, form, teil, rot, dz, [(p, n) for p, n, _ in punkte])
+        auf_teil = sum(z is not None for _, _, z in extra)
         print(f"  {len(punkte)} Stützpunkte vom Original übernommen, {len(extra)} an "
-              f"Fenster-Oberkanten ergänzt" + (f", {blockiert} ohne Freigang weggelassen"
-                                              if blockiert else ""))
+              f"Überhängen der optimierten Form ergänzt ({auf_teil} davon auf dem Teil)")
         punkte = punkte + extra
     sup, staemme = [], []
-    for p, n in punkte:
+    for p, n, ziel in punkte:
         pp = rot @ np.asarray(p, float) + [0, 0, dz]
-        tt, stamm = stuetze(pp, rot @ np.asarray(n, float))
+        nd = rot @ np.asarray(n, float)
+        if ziel is None:
+            tt, stamm = stuetze(pp, nd)
+            staemme.append(stamm)
+        else:
+            tt = stuetze_auf_teil(pp, nd, ziel)
         sup += tt
-        staemme.append(stamm)
     st, reihen = streben(staemme)
-    alles = trimesh.boolean.union([teil] + sup + st + schienen(reihen), engine="manifold")
+    # check_volume aus: Berührkanten der optimierten Form verträgt manifold3d
+    alles = trimesh.boolean.union([teil] + sup + st + schienen(reihen), engine="manifold",
+                                  check_volume=False)
     alles.apply_translation([-alles.bounds[0][0], -alles.bounds[0][1], 0])
     return alles
 
@@ -283,7 +315,7 @@ if __name__ == "__main__":
         if a.optimiert:
             tag = f"{name}_{round(100 * a.optimiert)}"
             form = trimesh.load(os.path.join(stl_dir, "..", "optimierung", f"konstruktion_{tag}.stl"))
-            zusatz = "_optimiert"
+            zusatz = f"_{round(100 * a.optimiert)}_optimiert"
             print(f"{name}: {len(stuetzpunkte(name))} Stützpunkte am Original, "
                   f"{len(stuetzpunkte(name, form))} am optimierten Teil")
         platte, einzel = druckplatte(name, form)

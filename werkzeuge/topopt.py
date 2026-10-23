@@ -36,6 +36,7 @@ import scipy.ndimage as ndi
 import scipy.sparse as sp
 from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial import cKDTree
+import manifold3d
 import pyamg
 import trimesh
 from skimage.measure import marching_cubes
@@ -185,6 +186,15 @@ def punkte_innen(mesh, P):
         zs = w0[t] * A[t, 2] + w1[t] * B[t, 2] + w2[t] * C[t, 2]
         drin[k] = (zs > z).sum() % 2 == 1
     return drin
+
+
+def vereinfachen(mesh, toleranz=0.02):
+    """Dreiecke einsparen, ohne die Form um mehr als toleranz [mm] zu ändern
+    (Fläche aus dem Dichtefeld ist sonst unnötig fein, STL ~4x größer)."""
+    m = manifold3d.Manifold(manifold3d.Mesh(vert_properties=np.asarray(mesh.vertices, np.float32),
+                                            tri_verts=np.asarray(mesh.faces, np.uint32)))
+    o = m.simplify(toleranz).to_mesh()
+    return trimesh.Trimesh(o.vert_properties[:, :3], o.tri_verts, process=False)
 
 
 def zylinder(p0, p1, r, seg=48):
@@ -650,7 +660,8 @@ class Modell:
         weg = [s.volume for s in stuecke if s.volume <= insel_anteil * groesste]
         if weg:
             self.log(f"  {len(weg)} Inseln entfernt ({sum(weg):.1f} mm³)")
-        return trimesh.util.concatenate([s for s in stuecke if s.volume > insel_anteil * groesste])
+        return vereinfachen(trimesh.util.concatenate(
+            [s for s in stuecke if s.volume > insel_anteil * groesste]))
 
     def aussenflaechen(self):
         """Sichtbare Elementflächen als Vierecke (n, 4, 3), dazu Element-Index
