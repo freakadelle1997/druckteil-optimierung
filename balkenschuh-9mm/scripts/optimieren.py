@@ -11,8 +11,11 @@ Lastannahme je Schuh (einstellbar unten):
   - Auflage:   150 N senkrecht auf den Taschenboden (Brett steht auf)
   - Schrauben: 150 N senkrecht über die beiden Brettschrauben (falls das
                Brett nicht aufsitzt)
-  - seitlich:   30 N quer gegen eine Wange (Anstoßen); die Gegenrichtung
-               deckt die Spiegelsymmetrie ab
+  - seitlich:   30 N quer (Anstoßen), vom verschraubten Brett über die
+               Innenseite der Brettschrauben-Ringe in eine Wange; die
+               Gegenrichtung deckt die Spiegelsymmetrie ab. (Nicht über die
+               ganze Wangenfläche verteilen: dann baut die Optimierung zu
+               jedem Lastpunkt eine eigene Rippe, ein Kamm aus Zinken.)
   - Zug:        50 N nach vorne über die Brettschrauben (halbes Gewicht)
 
 Lagerung: Die Schraubenköpfe mit Unterlegscheibe (wand: Ø 10) bzw. die
@@ -20,7 +23,8 @@ Senkköpfe (holz: Ø 7,4) klemmen die Lasche fest; die übrige Wandseite liegt
 nur auf Druck an (hebt oben ab, wenn das Brett nach unten zieht).
 
 Schutzbereiche (bleiben massiv): Taschenboden, Ringe um Wand- und
-Brettschrauben.
+Brettschrauben, 3-mm-Steg an Vorder- und Oberkante der Wangen (führt das
+Brett, keine ausfransenden Kanten).
 
 Aufruf (Python 3.13):
   python3.13 optimieren.py wand            Optimieren, STL + Bilder
@@ -61,6 +65,7 @@ VOLUMEN = 0.5                # Anteil des Originalvolumens, der bleibt
 KLEMM_R = {"wand": 5.0, "holz": 3.7}   # Scheibe Ø 10 / Senkkopf Ø 7,4
 RING = 2.0                   # Schutzring um die Klemmfläche
 BRETT_RING = 2.5             # Schutzring um die Brettlöcher
+RAND = 3.0                   # Steg an Vorder- und Oberkante der Wangen
 SITZE = 4                    # Teile je Druckplatte
 
 opt_dir = os.path.abspath(os.path.join(here, "..", "optimierung"))
@@ -90,6 +95,8 @@ def randbedingungen(m, variante):
     for z in bs.BRETT_LOCH_Z:
         m.behalten(to.zylinder((-bs.xa - 1, bs.BRETT_LOCH_Y, bs.T_BODEN + z),
                                (bs.xa + 1, bs.BRETT_LOCH_Y, bs.T_BODEN + z), rb + BRETT_RING))
+    m.behalten(to.quader([-bs.xa - 1, bs.TIEFE - RAND, -1], [bs.xa + 1, bs.TIEFE + 1, bs.H + 1]))
+    m.behalten(to.quader([-bs.xa - 1, -1, bs.H - RAND], [bs.xa + 1, bs.TIEFE + 1, bs.H + 1]))
 
     # Lasten
     m.last("Auflage", m.knoten_wo(lambda X, Y, Z: (np.abs(Z - bs.T_BODEN) < eps)
@@ -106,8 +113,11 @@ def randbedingungen(m, variante):
                                         & (Y >= bs.BRETT_LOCH_Y), True) for z in bs.BRETT_LOCH_Z])
     m.last("Schrauben", unten, (0, 0, -F_SENK))
     m.last("Zug", vorne, (0, F_ZUG, 0), gewicht=0.5)
-    m.last("seitlich", m.knoten_wo(lambda X, Y, Z: (np.abs(X - bs.xi) < eps)
-                                   & (Z >= bs.T_BODEN - eps)), (F_SEIT, 0, 0))
+    ring = np.concatenate([m.knoten_wo(
+        lambda X, Y, Z: (np.abs(X - bs.xi) < eps)
+        & (np.hypot(Y - bs.BRETT_LOCH_Y, Z - bs.T_BODEN - z) <= rb + BRETT_RING), True)
+        for z in bs.BRETT_LOCH_Z])
+    m.last("seitlich", ring, (F_SEIT, 0, 0))
 
 
 def zusammenfassung(name, m, r):
@@ -198,7 +208,7 @@ def main():
         xP = np.load(dichte_datei)["xP"]
         verlauf = []
     else:
-        erg = m0.optimieren(a.vol, rmin=a.rmin)
+        erg = m0.optimieren(a.vol, rmin=a.rmin, beta_max=16, stufe=20, max_iter=120)
         xP, verlauf = erg["xP"], erg["verlauf"]
         np.savez_compressed(dichte_datei, xP=xP)
     neu = m0.ergebnis_mesh(xP)

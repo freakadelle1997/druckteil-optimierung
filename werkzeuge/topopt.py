@@ -635,7 +635,8 @@ class Modell:
         F = np.pad(F, 1, constant_values=0)
         schritt = np.array([gi[1] - gi[0] for gi in g])
         v, f, _, _ = marching_cubes(F, schwelle, spacing=tuple(schritt))
-        dichte = trimesh.Trimesh(v + lo - schritt, f)
+        # ohne process: das Aufräumen entfernt entartete Dreiecke und reißt Löcher
+        dichte = trimesh.Trimesh(v + lo - schritt, f, process=False)
         trimesh.smoothing.filter_taubin(dichte, iterations=glatt)
         if dichte.volume < 0:
             dichte.invert()
