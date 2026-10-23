@@ -1,0 +1,64 @@
+name: Optimieren
+# Topologie-Optimierung von Druckteilen. Gestartet wird von außen per
+# workflow_dispatch (gh workflow run); jeder Eintrag in "laeufe" bekommt einen
+# eigenen Runner, alle rechnen parallel. Ergebnisse (STL, Bilder, Berichte,
+# Protokoll) liegen danach als Artefakt am Lauf.
+on:
+  workflow_dispatch:
+    inputs:
+      teil:
+        description: "Ordner des Teils, z. B. balkenschuh-9mm"
+        required: true
+      laeufe:
+        description: 'JSON-Liste der Aufrufe, z. B. ["wand --vol 0.5", "holz --vol 0.35"]'
+        required: true
+      skript:
+        description: "Skript im Teil-Ordner"
+        default: scripts/optimieren.py
+      kennung:
+        description: "frei wählbar, steht im Laufnamen (zum Wiederfinden)"
+        default: ""
+run-name: ${{ inputs.teil }} · ${{ inputs.kennung }}
+permissions:
+  contents: read
+env:
+  TZ: Europe/Berlin
+  TOPOPT_PARALLEL: "1"      # Lastfälle in eigenen Prozessen (4 Kerne, 16 GB)
+  OMP_NUM_THREADS: "1"      # je Prozess ein Kern, sonst überbuchen sich die Bibliotheken
+  OPENBLAS_NUM_THREADS: "1"
+jobs:
+  rechnen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        lauf: ${{ fromJSON(inputs.laeufe) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - name: Rechnen
+        working-directory: ${{ inputs.teil }}
+        env:
+          SKRIPT: ${{ inputs.skript }}
+          LAUF: ${{ matrix.lauf }}
+        # $LAUF bewusst ohne Anführungszeichen: wird in Argumente zerlegt
+        run: python -u "$SKRIPT" $LAUF 2>&1 | tee lauf.log
+      - name: Artefaktname
+        id: name
+        if: always()
+        env:
+          LAUF: ${{ matrix.lauf }}
+        run: echo "n=$(printf '%s' "$LAUF" | tr -c 'A-Za-z0-9.-' '_')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ergebnis_${{ steps.name.outputs.n }}
+          path: |
+            ${{ inputs.teil }}
+            !${{ inputs.teil }}/scripts
+          retention-days: 14
