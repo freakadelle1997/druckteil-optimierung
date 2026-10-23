@@ -43,6 +43,7 @@ jobs:
       - run: pip install -q -r requirements.txt
       - name: Rechnen
         working-directory: ${{ inputs.teil }}
+        shell: bash   # mit pipefail, sonst verschluckt tee den Fehlercode
         env:
           SKRIPT: ${{ inputs.skript }}
           LAUF: ${{ matrix.lauf }}
