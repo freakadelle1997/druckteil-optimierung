@@ -457,6 +457,8 @@ class Modell:
         t0 = time.time()
         rechte = {fall: np.where(self.fest_dof, 0.0, f) for fall, (f, _) in self.lastfaelle.items()}
         if self.parallel:
+            if not self._prozesse:
+                self._prozesse_starten()
             self._basis[:] = basis
             for fall, (hier, _) in self._prozesse.items():
                 hier.send((aktiv[fall], rechte[fall], None if u0 is None else u0[fall], tol))

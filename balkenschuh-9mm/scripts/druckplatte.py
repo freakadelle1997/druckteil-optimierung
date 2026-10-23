@@ -199,8 +199,11 @@ def ueberhang_punkte(variante, form, teil, rot, dz, vorhanden):
     n /= np.linalg.norm(n, axis=1, keepdims=True)
     flach = (n @ rot.T)[:, 2] < -np.cos(np.radians(UEBERHANG))
     c, n = c[flach], n[flach]
-    schnitt = topopt.punkte_innen(orig, c + 0.3 * n)      # außen davor war Material
-    c, n = c[schnitt], n[schnitt]
+    # neue Flächen: Schnitt ins Original (davor war Material) oder ganz außerhalb
+    # des Originals (Bauraum-Modus); Originalflächen tragen schon das Grundraster
+    neu_flaeche = (topopt.punkte_innen(orig, c + 0.3 * n)
+                   | ~topopt.punkte_innen(orig, c - 0.3 * n))
+    c, n = c[neu_flaeche], n[neu_flaeche]
     hoehe = (c @ rot.T)[:, 2]
     belegt = [np.asarray(p, float) for p, _ in vorhanden]
     gewaehlt = []
