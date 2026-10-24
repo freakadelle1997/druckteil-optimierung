@@ -111,7 +111,10 @@ def bauraum(variante):
     return trimesh.boolean.difference([block] + weg, engine="manifold")
 
 
-def randbedingungen(m, variante):
+def randbedingungen(m, variante, stege=True):
+    """stege=False (Bauraum-Modus, Manuels Wahl 24.10.): keine Führungsstege und
+    keine Führungslast. Das Brett ist ohnehin zweimal durch beide Wangen
+    verschraubt; Stege tragen nichts und hingen im Skelett halb frei."""
     tl = bs.VARIANTEN[variante]["t_lasche"]
     rk = KLEMM_R[variante]
     eps = 1e-6
@@ -133,8 +136,9 @@ def randbedingungen(m, variante):
     for z in bs.BRETT_LOCH_Z:
         m.behalten(to.zylinder((-bs.xa - 1, bs.BRETT_LOCH_Y, bs.T_BODEN + z),
                                (bs.xa + 1, bs.BRETT_LOCH_Y, bs.T_BODEN + z), rb + BRETT_RING))
-    m.behalten(to.quader([-bs.xa - 1, bs.TIEFE - RAND, -1], [bs.xa + 1, bs.TIEFE + 1, bs.H + 1]))
-    m.behalten(to.quader([-bs.xa - 1, -1, bs.H - RAND], [bs.xa + 1, bs.TIEFE + 1, bs.H + 1]))
+    if stege:
+        m.behalten(to.quader([-bs.xa - 1, bs.TIEFE - RAND, -1], [bs.xa + 1, bs.TIEFE + 1, bs.H + 1]))
+        m.behalten(to.quader([-bs.xa - 1, -1, bs.H - RAND], [bs.xa + 1, bs.TIEFE + 1, bs.H + 1]))
 
     # Lasten
     m.last("Auflage", m.knoten_wo(lambda X, Y, Z: (np.abs(Z - bs.T_BODEN) < eps)
@@ -156,9 +160,10 @@ def randbedingungen(m, variante):
         & (np.hypot(Y - bs.BRETT_LOCH_Y, Z - bs.T_BODEN - z) <= rb + BRETT_RING), True)
         for z in bs.BRETT_LOCH_Z])
     m.last("seitlich", ring, (F_SEIT, 0, 0))
-    steg = m.knoten_wo(lambda X, Y, Z: (np.abs(X - bs.xi) < eps) & (Z >= bs.T_BODEN - eps)
-                       & ((Y >= bs.TIEFE - RAND - eps) | (Z >= bs.H - RAND - eps)), True)
-    m.last("Führung", steg, (F_FUEHRUNG, 0, 0))
+    if stege:
+        steg = m.knoten_wo(lambda X, Y, Z: (np.abs(X - bs.xi) < eps) & (Z >= bs.T_BODEN - eps)
+                           & ((Y >= bs.TIEFE - RAND - eps) | (Z >= bs.H - RAND - eps)), True)
+        m.last("Führung", steg, (F_FUEHRUNG, 0, 0))
 
 
 def zusammenfassung(name, m, r):
@@ -252,7 +257,8 @@ def main():
     t0 = time.time()
     m_orig = to.Modell(orig, H_RASTER, symmetrie_x=True)
     m_orig.ausfuehrlich = a.ausfuehrlich
-    randbedingungen(m_orig, v)
+    stege = not a.bauraum
+    randbedingungen(m_orig, v, stege)
     r0 = m_orig.pruefen()
     if a.bauraum:
         m_orig.beenden()
@@ -263,7 +269,7 @@ def main():
               f"Ziel {a.vol:.0%} = {a.vol * raum.volume / 1000:.1f} cm³")
         m0 = to.Modell(raum, h, symmetrie_x=True)
         m0.ausfuehrlich = a.ausfuehrlich
-        randbedingungen(m0, v)
+        randbedingungen(m0, v, stege)
     else:
         m0 = m_orig
     if a.nur_mesh:
@@ -279,7 +285,7 @@ def main():
           f"{neu.volume / 1000:.1f} cm³")
 
     m1 = to.Modell(neu, H_RASTER, symmetrie_x=True)
-    randbedingungen(m1, v)
+    randbedingungen(m1, v, stege)
     r1 = m1.pruefen()
     m1.beenden()
     s1 = zusammenfassung("Optimiert", m1, r1)
@@ -295,7 +301,7 @@ def main():
     print(out)
     with open(os.path.join(opt_dir, f"bericht_{tag}.json"), "w") as f:
         json.dump(dict(variante=v, bauraum=a.bauraum, volumenanteil=a.vol, h=h, rmin=rmin,
-                       rundung=a.rundung,
+                       rundung=a.rundung, stege=stege,
                        lasten=dict(senkrecht=F_SENK, seitlich=F_SEIT, zug=F_ZUG,
                                    fuehrung=F_FUEHRUNG),
                        werkstoff=to.ABS_LIKE_3,

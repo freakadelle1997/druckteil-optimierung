@@ -683,7 +683,12 @@ class Modell:
             F[i] = ip(np.column_stack([np.full(Y.size, xv), Y.ravel(), Z.ravel()])).reshape(Y.shape)
         schritt = np.array([gi[1] - gi[0] for gi in g])
         if rundung > 0:
+            # Schwelle so wählen, dass das Volumen gleich bleibt: an der festen
+            # Schwelle 0,5 würden dünne Streben beim Weichzeichnen schmaler
+            vorher = (F >= schwelle).mean()
             F = ndi.gaussian_filter(F, rundung / schritt, mode="nearest")
+            schwelle = float(np.clip(np.quantile(F, 1 - vorher), 0.25, schwelle))
+            self.log(f"  Rundung {rundung} mm, Schwelle {schwelle:.2f} (volumengleich)")
         F = np.pad(F, 1, constant_values=0)
         v, f, _, _ = marching_cubes(F, schwelle, spacing=tuple(schritt))
         # ohne process: das Aufräumen entfernt entartete Dreiecke und reißt Löcher
