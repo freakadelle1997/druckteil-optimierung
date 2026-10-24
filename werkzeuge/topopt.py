@@ -706,8 +706,14 @@ class Modell:
         weg = [s.volume for s in stuecke if s.volume <= insel_anteil * groesste]
         if weg:
             self.log(f"  {len(weg)} Inseln entfernt ({sum(weg):.1f} mm³)")
-        return vereinfachen(trimesh.util.concatenate(
+        teil = vereinfachen(trimesh.util.concatenate(
             [s for s in stuecke if s.volume > insel_anteil * groesste]))
+        n = len(manifold3d.Manifold(manifold3d.Mesh(
+            vert_properties=np.asarray(teil.vertices, np.float32),
+            tri_verts=np.asarray(teil.faces, np.uint32))).decompose())
+        if n > 1:
+            self.log(f"Warnung: Ergebnis besteht aus {n} getrennten Stücken")
+        return teil
 
     def aussenflaechen(self):
         """Sichtbare Elementflächen als Vierecke (n, 4, 3), dazu Element-Index

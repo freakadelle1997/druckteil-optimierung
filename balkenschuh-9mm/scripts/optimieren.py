@@ -63,6 +63,7 @@ F_SENK = 150.0               # N je Schuh, senkrecht
 F_SEIT = 30.0                # N je Schuh, quer
 F_ZUG = 50.0                 # N je Schuh, nach vorne
 F_FUEHRUNG = 20.0            # N je Schuh, quer gegen die Stege
+F_VERBUND = 30.0             # N zwischen oberem und unterem Brettschrauben-Auge (Bauraum)
 H_RASTER = 1.0               # mm Elementgröße (Wände liegen exakt auf dem Raster)
 RMIN = 2.0                   # mm Filterradius, kleinste Strebe etwa 4 mm
 VOLUMEN = 0.5                # Anteil des Originalvolumens, der bleibt
@@ -111,10 +112,14 @@ def bauraum(variante):
     return trimesh.boolean.difference([block] + weg, engine="manifold")
 
 
-def randbedingungen(m, variante, stege=True):
+def randbedingungen(m, variante, stege=True, verbund=False):
     """stege=False (Bauraum-Modus, Manuels Wahl 24.10.): keine Führungsstege und
     keine Führungslast. Das Brett ist ohnehin zweimal durch beide Wangen
-    verschraubt; Stege tragen nichts und hingen im Skelett halb frei."""
+    verschraubt; Stege tragen nichts und hingen im Skelett halb frei.
+    verbund=True: Kräftepaar zwischen oberem und unterem Brettschrauben-Auge
+    (Quellen/Biegen des Bretts, Handhabung). Ohne diesen Lastfall zerfiel das
+    leichteste Skelett in drei Teile (Fuß + zwei obere Halter); Manuel will
+    ein Teil."""
     tl = bs.VARIANTEN[variante]["t_lasche"]
     rk = KLEMM_R[variante]
     eps = 1e-6
@@ -154,6 +159,10 @@ def randbedingungen(m, variante, stege=True):
     vorne = np.concatenate([m.knoten_wo(lambda X, Y, Z: lochrand(X, Y, Z, bs.T_BODEN + z)
                                         & (Y >= bs.BRETT_LOCH_Y), True) for z in bs.BRETT_LOCH_Z])
     m.last("Schrauben", unten, (0, 0, -F_SENK))
+    if verbund:
+        oben_z, unten_z = bs.T_BODEN + max(bs.BRETT_LOCH_Z), bs.T_BODEN + min(bs.BRETT_LOCH_Z)
+        m.last("Verbund", m.knoten_wo(lambda X, Y, Z: lochrand(X, Y, Z, oben_z), True), (0, 0, F_VERBUND))
+        m.last("Verbund", m.knoten_wo(lambda X, Y, Z: lochrand(X, Y, Z, unten_z), True), (0, 0, -F_VERBUND))
     m.last("Zug", vorne, (0, F_ZUG, 0), gewicht=0.5)
     ring = np.concatenate([m.knoten_wo(
         lambda X, Y, Z: (np.abs(X - bs.xi) < eps)
@@ -258,7 +267,7 @@ def main():
     m_orig = to.Modell(orig, H_RASTER, symmetrie_x=True)
     m_orig.ausfuehrlich = a.ausfuehrlich
     stege = not a.bauraum
-    randbedingungen(m_orig, v, stege)
+    randbedingungen(m_orig, v, stege, a.bauraum)
     r0 = m_orig.pruefen()
     if a.bauraum:
         m_orig.beenden()
@@ -269,7 +278,7 @@ def main():
               f"Ziel {a.vol:.0%} = {a.vol * raum.volume / 1000:.1f} cm³")
         m0 = to.Modell(raum, h, symmetrie_x=True)
         m0.ausfuehrlich = a.ausfuehrlich
-        randbedingungen(m0, v, stege)
+        randbedingungen(m0, v, stege, a.bauraum)
     else:
         m0 = m_orig
     if a.nur_mesh:
@@ -285,7 +294,7 @@ def main():
           f"{neu.volume / 1000:.1f} cm³")
 
     m1 = to.Modell(neu, H_RASTER, symmetrie_x=True)
-    randbedingungen(m1, v, stege)
+    randbedingungen(m1, v, stege, a.bauraum)
     r1 = m1.pruefen()
     m1.beenden()
     s1 = zusammenfassung("Optimiert", m1, r1)
