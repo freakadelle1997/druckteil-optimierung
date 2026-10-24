@@ -223,20 +223,29 @@ def _cg(A, b, x0, tol, c, B, aktiv):
     """CG mit Mehrgitter-Vorkonditionierer c (Cache je Lastfall). Neu aufbauen,
     wenn CG damit deutlich langsamer wird als direkt nach dem Aufbau oder sich
     der Wandkontakt nennenswert geändert hat."""
-    if (c is None or c["schritte"] > 1.5 * c["start"] + 10
-            or (c["maske"] != aktiv).mean() > 0.005):
+    def aufbauen():
         ml = pyamg.smoothed_aggregation_solver(
             A, B=B, max_coarse=1000,
             smooth=("energy", {"krylov": "cg", "maxiter": 2, "degree": 1, "weighting": "local"}))
-        c = dict(M=ml.aspreconditioner(cycle="V"), start=None, schritte=0, maske=aktiv.copy())
-    res = []
-    u, _ = pyamg.krylov.cg(A, b, x0=x0, tol=tol, maxiter=1000, M=c["M"], residuals=res)
+        return dict(M=ml.aspreconditioner(cycle="V"), start=None, schritte=0, maske=aktiv.copy(),
+                    frisch=True)
+
+    if (c is None or c["schritte"] > 1.5 * c["start"] + 10
+            or (c["maske"] != aktiv).mean() > 0.005):
+        c = aufbauen()
+    for versuch in range(2):
+        res = []
+        u, _ = pyamg.krylov.cg(A, b, x0=x0, tol=tol, maxiter=2000, M=c["M"], residuals=res)
+        if res[-1] <= 10 * tol * np.linalg.norm(b) or c["frisch"]:
+            break
+        c, x0 = aufbauen(), u        # alter Vorkonditionierer passt nicht mehr
+    c["frisch"] = False
     c["schritte"] = len(res)
     c["start"] = c["start"] or len(res)
     return u, c, len(res), res[-1] / np.linalg.norm(b)
 
 
-def _arbeiter(verbindung, shm_name, n, ndof, spalten, indptr, B, k_idx, k_pen):
+def _arbeiter(verbindung, shm_name, n, ndof, spalten, indptr, B, k_idx):
     """Eigener Prozess je Lastfall: liest die Grundmatrix aus gemeinsamem
     Speicher, ergänzt seine Kontaktfedern und löst."""
     from multiprocessing import shared_memory
@@ -245,9 +254,9 @@ def _arbeiter(verbindung, shm_name, n, ndof, spalten, indptr, B, k_idx, k_pen):
     c = None
     try:
         while (auftrag := verbindung.recv()) is not None:
-            aktiv, b, x0, tol = auftrag
+            aktiv, b, x0, tol, kfed = auftrag
             d = basis.copy()
-            np.add.at(d, k_idx, k_pen * aktiv)
+            np.add.at(d, k_idx, kfed * aktiv)
             u, c, schritte, rest = _cg(_matrix(d, spalten, indptr, ndof), b, x0, tol, c, B, aktiv)
             verbindung.send((u, schritte, rest))
     finally:
@@ -426,7 +435,7 @@ class Modell:
             hier, dort = ctx.Pipe()
             p = ctx.Process(target=_arbeiter, daemon=True,
                             args=(dort, self._shm.name, n, self.ndof, self._bl_spalten,
-                                  self._indptr, self._B, self._diag[self.k_dof], self.k_pen))
+                                  self._indptr, self._B, self._diag[self.k_dof]))
             p.start()
             self._prozesse[fall] = (hier, p)
         atexit.register(self.beenden)
@@ -456,18 +465,21 @@ class Modell:
         basis[self._diag[self.fest_dof]] = self._d0
         t0 = time.time()
         rechte = {fall: np.where(self.fest_dof, 0.0, f) for fall, (f, _) in self.lastfaelle.items()}
+        # Kontaktfedern 10 x örtliche Steifigkeit: eine feste Feder wäre bei fast
+        # leerem Material tausendmal steifer als die Umgebung (CG kommt nicht ins Ziel)
+        kfed = 10 * np.maximum(basis[self._diag[self.k_dof]], 1e-9 * self._d0)
         if self.parallel:
             if not self._prozesse:
                 self._prozesse_starten()
             self._basis[:] = basis
             for fall, (hier, _) in self._prozesse.items():
-                hier.send((aktiv[fall], rechte[fall], None if u0 is None else u0[fall], tol))
+                hier.send((aktiv[fall], rechte[fall], None if u0 is None else u0[fall], tol, kfed))
             antworten = {fall: hier.recv() for fall, (hier, _) in self._prozesse.items()}
         else:
             antworten = {}
             for fall in self.lastfaelle:
                 d = basis.copy()
-                np.add.at(d, self._diag[self.k_dof], self.k_pen * aktiv[fall])
+                np.add.at(d, self._diag[self.k_dof], kfed * aktiv[fall])
                 A = _matrix(d, self._bl_spalten, self._indptr, self.ndof)
                 u, self._amg[fall], n, rest = _cg(A, rechte[fall], None if u0 is None else u0[fall],
                                                   tol, self._amg.get(fall), self._B, aktiv[fall])
@@ -612,11 +624,14 @@ class Modell:
                 dc, dv = 0.5 * (dc + dc[spiegel]), 0.5 * (dv + dv[spiegel])
 
             ratio = np.where(dv > 0, np.maximum(-dc, 0) / np.maximum(dv, 1e-30), 0)
-            ratio /= max(np.median(ratio[~self.passiv]), 1e-30)
+            # auf den Größtwert normieren, nicht auf den Median: bei kleinen
+            # Volumenzielen tragen die meisten Elemente nichts, der Median ist 0
+            # und die Suche nach dem Lagrange-Faktor lief ins Leere (Volumen stieg)
+            ratio /= max(ratio[~self.passiv].max(), 1e-300)
             move = 0.1 if beta < 8 else 0.05
             lo_x, hi_x = np.maximum(0, x - move), np.minimum(1, x + move)
-            l1, l2 = 1e-12, 1e12
-            while l2 / l1 > 1 + 1e-5:
+            l1, l2 = 1e-40, 1e2
+            while l2 / l1 > 1 + 1e-6:
                 lm = np.sqrt(l1 * l2)
                 xn = np.clip(x * np.sqrt(ratio / lm), lo_x, hi_x)
                 xn[self.passiv] = 1
@@ -629,6 +644,9 @@ class Modell:
             aenderung = np.abs(xn - x).max()
             x = xn
             xP = physisch(x, beta)
+            if abs((xP * self.vol).sum() / V_ziel - 1) > 0.02:
+                self.log(f"  Warnung: Volumen {(xP * self.vol).sum() / self.vol.sum():.3f} "
+                         f"weicht vom Ziel {volumenanteil:.3f} ab")
             grau = (4 * xP * (1 - xP) * self.vol).sum() / self.vol.sum()
             verlauf.append(dict(it=it, beta=beta, c=c, vol=(xP * self.vol).sum() / self.vol.sum(),
                                 aenderung=aenderung, grau=grau))
